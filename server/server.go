@@ -9,9 +9,12 @@ import (
 	"os/signal"
 
 	pb "github.com/bruce-mig/grpc-crud-mongodb/proto"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/internal/status"
 )
 
 var (
@@ -27,12 +30,14 @@ type (
 	}
 
 	blogItem struct {
-		ID       string `bson:"_id,omitempty"`
-		AuthorID string `bson:"author_id"`
-		Content  string `bson:"content"`
-		Title    string `bson:"title"`
+		ID       primitive.ObjectID `bson:"_id,omitempty"`
+		AuthorID string             `bson:"author_id"`
+		Content  string             `bson:"content"`
+		Title    string             `bson:"title"`
 	}
 )
+
+const Endpoint = "localhost:50051"
 
 func main() {
 	//if go code crashes, we get file name and line number
@@ -49,7 +54,7 @@ func main() {
 
 	fmt.Println("Blog server started")
 	grpcBloggerServer := &GRPCBloggerServer{}
-	lis, err := net.Listen("tcp", "0.0.0.0:50051")
+	lis, err := net.Listen("tcp", Endpoint)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
@@ -79,4 +84,40 @@ func main() {
 	client.Disconnect(context.TODO())
 	fmt.Println("End of program")
 
+}
+
+func (*GRPCBloggerServer) CreateBlog(ctx context.Context, req *pb.CreateBlogRequest) (*pb.CreateBlogResponse, error) {
+	fmt.Println("Create blog request")
+	blog := req.GetBlog()
+
+	data := &blogItem{
+		AuthorID: blog.GetAuthorId(),
+		Title:    blog.GetTitle(),
+		Content:  blog.GetContent(),
+	}
+
+	res, err := collection.InsertOne(ctx, data)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Internal error:%v", err),
+		)
+	}
+
+	objectID, ok := res.InsertedID.(primitive.ObjectID)
+	if !ok {
+		return nil, status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Cannot convert to OID"),
+		)
+	}
+
+	return &pb.CreateBlogResponse{
+		Blog: &pb.Blog{
+			Id:       objectID.Hex(),
+			AuthorId: blog.GetAuthorId(),
+			Title:    blog.GetTitle(),
+			Content:  blog.Content,
+		},
+	}, nil
 }
