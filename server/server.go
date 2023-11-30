@@ -9,6 +9,7 @@ import (
 	"os/signal"
 
 	pb "github.com/bruce-mig/grpc-crud-mongodb/proto"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -19,7 +20,7 @@ import (
 
 var (
 	collection *mongo.Collection
-	mongoURI   = "mongodb://localhost:27017"
+	mongoURI   = "mongodb://172.20.128.1:27017"
 )
 
 const dbName = "grpc-crud"
@@ -76,8 +77,8 @@ func main() {
 
 	//Block until a signal is received
 	<-ch
-	fmt.Println("Stopping the server")
-	s.Stop()
+	fmt.Println("Gracefully Stopping the server")
+	s.GracefulStop()
 	fmt.Println("Closing the listener")
 	lis.Close()
 	fmt.Println("Closing MongoDB Connection")
@@ -108,7 +109,7 @@ func (*GRPCBloggerServer) CreateBlog(ctx context.Context, req *pb.CreateBlogRequ
 	if !ok {
 		return nil, status.Errorf(
 			codes.Internal,
-			fmt.Sprintf("Cannot convert to OID"),
+			fmt.Sprintln("Cannot convert to OID"),
 		)
 	}
 
@@ -117,7 +118,152 @@ func (*GRPCBloggerServer) CreateBlog(ctx context.Context, req *pb.CreateBlogRequ
 			Id:       objectID.Hex(),
 			AuthorId: blog.GetAuthorId(),
 			Title:    blog.GetTitle(),
-			Content:  blog.Content,
+			Content:  blog.GetContent(),
 		},
 	}, nil
+}
+
+func (*GRPCBloggerServer) ReadBlog(ctx context.Context, req *pb.ReadBlogRequest) (*pb.ReadBlogResponse, error) {
+	fmt.Println("Read blog request")
+
+	blogID := req.GetBlogId()
+	oID, err := primitive.ObjectIDFromHex(blogID)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			fmt.Sprintln("Cannot parse ID."),
+		)
+	}
+
+	//create an empty struct
+	data := &blogItem{}
+
+	filter := bson.D{{Key: "_id", Value: oID}}
+	res := collection.FindOne(context.Background(), filter)
+
+	if err = res.Decode(data); err != nil {
+		return nil, status.Errorf(
+			codes.NotFound,
+			fmt.Sprintf("Cannot find blog with specified ID: %v.\n", err),
+		)
+	}
+
+	return &pb.ReadBlogResponse{
+		Blog: dataToBlogPb(data),
+	}, nil
+
+}
+
+func dataToBlogPb(data *blogItem) *pb.Blog {
+	return &pb.Blog{
+		Id:       data.ID.Hex(),
+		AuthorId: data.AuthorID,
+		Content:  data.Content,
+		Title:    data.Title,
+	}
+}
+
+func (*GRPCBloggerServer) UpdateBlog(ctx context.Context, req *pb.UpdateBlogRequest) (*pb.UpdateBlogResponse, error) {
+	fmt.Println("Update blog request")
+	blog := req.GetBlog()
+	oID, err := primitive.ObjectIDFromHex(blog.GetId())
+	if err != nil {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			fmt.Sprintln("Cannot parse ID."),
+		)
+	}
+
+	//create an empty struct
+	data := &blogItem{}
+	filter := bson.D{{Key: "_id", Value: oID}}
+
+	res := collection.FindOne(context.Background(), filter)
+	if err = res.Decode(data); err != nil {
+		return nil, status.Errorf(
+			codes.NotFound,
+			fmt.Sprintf("Cannot find blog with specified ID: %v.\n", err),
+		)
+	}
+
+	// update internal struct
+	data.AuthorID = blog.GetAuthorId()
+	data.Content = blog.GetContent()
+	data.Title = blog.GetTitle()
+
+	_, err = collection.ReplaceOne(context.Background(), filter, data)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Cannot update object in MongoDB: %v.\n", err),
+		)
+	}
+
+	return &pb.UpdateBlogResponse{
+		Blog: dataToBlogPb(data),
+	}, nil
+}
+
+func (*GRPCBloggerServer) DeleteBlog(ctx context.Context, req *pb.DeleteBlogRequest) (*pb.DeleteBlogResponse, error) {
+	fmt.Println("Delete blog request")
+	oID, err := primitive.ObjectIDFromHex(req.GetBlogId())
+	if err != nil {
+		return nil, status.Errorf(
+			codes.InvalidArgument,
+			fmt.Sprintln("Cannot parse ID."),
+		)
+	}
+
+	filter := bson.D{{Key: "_id", Value: oID}}
+
+	deleteRes, err := collection.DeleteOne(context.Background(), filter)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Cannot delete object in MongoDB: %v.\n", err),
+		)
+	}
+
+	if deleteRes.DeletedCount == 0 {
+		return nil, status.Errorf(
+			codes.NotFound,
+			fmt.Sprintf("Cannot find blog in MongoDB: %v.\n", err),
+		)
+	}
+
+	return &pb.DeleteBlogResponse{BlogId: req.GetBlogId()}, nil
+
+}
+
+func (*GRPCBloggerServer) ListBlog(req *pb.ListBlogRequest, stream pb.BlogService_ListBlogServer) error {
+	fmt.Println("List blog request")
+
+	filter := bson.D{}
+	cursor, err := collection.Find(context.Background(), filter)
+	if err != nil {
+		return status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Unknown internal error: %v", err),
+		)
+	}
+
+	defer cursor.Close(context.Background())
+	for cursor.Next(context.Background()) {
+		data := &blogItem{}
+		err := cursor.Decode(data)
+		if err != nil {
+			return status.Errorf(
+				codes.Internal,
+				fmt.Sprintf("Error while decoding data from MongoDB: %v", err),
+			)
+		}
+		stream.Send(&pb.ListBlogResponse{Blog: dataToBlogPb(data)})
+	}
+	if err := cursor.Err(); err != nil {
+		return status.Errorf(
+			codes.Internal,
+			fmt.Sprintf("Unknown internal error: %v", err),
+		)
+	}
+	return nil
 }
